@@ -7,7 +7,6 @@ import type { Bindings } from "../types";
 import {
   authTokens,
   categories,
-  coupons,
   orderItems,
   orders,
   payments,
@@ -16,7 +15,7 @@ import {
   type UserRow,
 } from "../db/schema";
 import { centsToStr } from "../lib/money";
-import { isCouponValidNow } from "../lib/coupons";
+import { findCouponByCode, isCouponValidNow } from "../lib/coupons";
 import { chatScopeLimit } from "../lib/rate-limit";
 
 const MODEL = "claude-haiku-4-5";
@@ -162,12 +161,12 @@ async function toolSearchProducts(db: Db, rawQuery: unknown): Promise<unknown> {
   };
 }
 
-async function toolCheckCoupon(db: Db, rawCode: unknown): Promise<unknown> {
+export async function toolCheckCoupon(db: Db, rawCode: unknown): Promise<unknown> {
   if (typeof rawCode !== "string" || rawCode.length === 0) {
     return { valid: false };
   }
 
-  const coupon = await db.select().from(coupons).where(eq(coupons.code, rawCode)).get();
+  const coupon = await findCouponByCode(db, rawCode);
   if (!coupon || !isCouponValidNow(coupon, Math.floor(Date.now() / 1000))) {
     return { valid: false };
   }

@@ -19,7 +19,7 @@ import {
   type UserRow,
 } from "../db/schema";
 import { centsToStr } from "../lib/money";
-import { discountForCents, isCouponValidNow } from "../lib/coupons";
+import { discountForCents, findCouponByCode, isCouponValidNow } from "../lib/coupons";
 import { constructWebhookEvent, getStripeClient, paymentIntentFor } from "../lib/stripe";
 import { requireAuth } from "../lib/auth-middleware";
 import { anonOrUserLimit } from "../lib/rate-limit";
@@ -144,12 +144,7 @@ app.post("/orders", anonOrUserLimit, async (c) => {
   const couponCodeRaw = body?.coupon_code;
   let coupon: CouponRow | null = null;
   if (typeof couponCodeRaw === "string" && couponCodeRaw.trim() !== "") {
-    const code = couponCodeRaw.trim();
-    const found = await db
-      .select()
-      .from(coupons)
-      .where(sql`lower(${coupons.code}) = lower(${code})`)
-      .get();
+    const found = await findCouponByCode(db, couponCodeRaw);
     if (!found || !isCouponValidNow(found, now())) {
       return c.json({ errors: { coupon_code: "invalid or expired coupon" } }, 400);
     }
@@ -332,12 +327,7 @@ app.post("/coupons/validate", anonOrUserLimit, async (c) => {
     return c.json({ detail: "invalid or expired coupon" }, 404);
   }
 
-  const trimmed = code.trim();
-  const found = await db
-    .select()
-    .from(coupons)
-    .where(sql`lower(${coupons.code}) = lower(${trimmed})`)
-    .get();
+  const found = await findCouponByCode(db, code);
 
   if (!found || !isCouponValidNow(found, now())) {
     return c.json({ detail: "invalid or expired coupon" }, 404);

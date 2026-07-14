@@ -4,7 +4,9 @@ import { drizzle } from "drizzle-orm/d1";
 import { eq } from "drizzle-orm";
 import worker from "../src/index";
 import type { Bindings } from "../src/types";
-import { payments, products, users } from "../src/db/schema";
+import { coupons, payments, products, users } from "../src/db/schema";
+import { findCouponByCode } from "../src/lib/coupons";
+import { toolCheckCoupon } from "../src/routes/support";
 
 interface TestBindings extends Bindings {
   TEST_MIGRATIONS: { name: string; queries: string[] }[];
@@ -390,5 +392,79 @@ describe("admin gating", () => {
       const anonRes = await call(path);
       expect(anonRes.status).toBe(401);
     }
+  });
+});
+
+// Codes are stored uppercase but customers type them however they like, so
+// every lookup path has to agree on case-insensitivity — the support chatbot
+// included, or it tells customers a working coupon is invalid.
+describe("coupon codes are matched case-insensitively on every path", () => {
+  async function insertCoupon(code: string) {
+    const [row] = await db
+      .insert(coupons)
+      .values({ code, discountType: "percent", valueHundredths: 1000, isActive: true })
+      .returning();
+    return row;
+  }
+
+  it("/api/coupons/validate accepts a lowercase spelling of an uppercase code", async () => {
+    await insertCoupon("SAVE10");
+
+    const res = await call("/api/coupons/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": nextIp() },
+      body: JSON.stringify({ code: "save10" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ code: "SAVE10", discount_type: "percent" });
+  });
+
+  it("checkout applies a coupon typed in the wrong case", async () => {
+    await insertCoupon("MIXED10");
+    const product = await insertProduct({ priceCents: 10000, stock: 5 });
+
+    const res = await call("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": nextIp() },
+      body: JSON.stringify({
+        items: [{ product: product.id, quantity: 1 }],
+        coupon_code: "  mIxEd10 ",
+        email: "buyer@example.com",
+        full_name: "Buyer Buyerson",
+        street: "Main St 1",
+        city: "Prague",
+        zip_code: "11000",
+        country: "CZ",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const order = (await res.json()) as OrderJSON;
+    expect(order.discount_amount).toBe("10.00");
+    expect(order.total).toBe("90.00");
+  });
+
+  it("findCouponByCode, the one lookup the chatbot and checkout share, ignores case", async () => {
+    await insertCoupon("SHARED10");
+
+    expect(await findCouponByCode(db, "shared10")).toMatchObject({ code: "SHARED10" });
+    expect(await findCouponByCode(db, "SHARED10")).toMatchObject({ code: "SHARED10" });
+    expect(await findCouponByCode(db, "  ShArEd10  ")).toMatchObject({ code: "SHARED10" });
+    expect(await findCouponByCode(db, "nope10")).toBeUndefined();
+  });
+
+  // The bug that started this: the chatbot used to match the code exactly, so
+  // it told customers a coupon checkout would happily accept was invalid.
+  it("the chatbot's check_coupon tool agrees with checkout on a lowercase code", async () => {
+    await insertCoupon("BOT10");
+
+    expect(await toolCheckCoupon(db, "bot10")).toEqual({
+      valid: true,
+      discount_type: "percent",
+      value: "10.00",
+    });
+    expect(await toolCheckCoupon(db, "BOT10")).toMatchObject({ valid: true });
+    expect(await toolCheckCoupon(db, "not-a-code")).toEqual({ valid: false });
   });
 });

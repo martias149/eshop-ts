@@ -30,6 +30,29 @@ describe("coupons", () => {
     expect(discountForCents(coupon, 10000)).toBe(1000); // 10% of 100.00 -> 10.00
   });
 
+  // Django's Decimal.quantize defaults to ROUND_HALF_EVEN, so an exact
+  // half-cent tie breaks toward the even cent, not always upward.
+  it("percent discount breaks an exact half-cent tie toward the even cent", () => {
+    const tenPercent = makeCoupon({ discountType: "percent", valueHundredths: 1000 });
+
+    // 10% of 123.45 -> 12.345, tie: 1234 is even, so it stays 1234 (naive
+    // half-up rounding would give 1235).
+    expect(discountForCents(tenPercent, 12345)).toBe(1234);
+
+    // 10% of 123.55 -> 12.355, tie: 1235 is odd, so it rounds up to 1236.
+    expect(discountForCents(tenPercent, 12355)).toBe(1236);
+
+    const quarterPercent = makeCoupon({ discountType: "percent", valueHundredths: 25 });
+    // 0.25% of 10.00 -> 2.5 cents, tie: 2 is even, stays 2 (half-up gives 3).
+    expect(discountForCents(quarterPercent, 1000)).toBe(2);
+  });
+
+  it("percent discount still rounds normally away from a tie", () => {
+    const tenPercent = makeCoupon({ discountType: "percent", valueHundredths: 1000 });
+    expect(discountForCents(tenPercent, 12346)).toBe(1235); // 12.346 -> up
+    expect(discountForCents(tenPercent, 12344)).toBe(1234); // 12.344 -> down
+  });
+
   it("fixed discount is capped at the subtotal, total never goes negative", () => {
     const coupon = makeCoupon({ discountType: "fixed", valueHundredths: 5000 }); // 50.00
     const subtotalCents = 2000; // 20.00
