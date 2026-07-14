@@ -216,12 +216,15 @@ admin.delete("/products/:id", async (c) => {
   const existing = await db.select({ id: products.id }).from(products).where(eq(products.id, id)).limit(1);
   if (!existing[0]) return c.json({ detail: "not found" }, 404);
 
-  const images = await db.select().from(productImages).where(eq(productImages.productId, id));
-  for (const img of images) {
-    try {
-      await deleteImage(c.env.MEDIA, img.r2Key);
-    } catch (err) {
-      console.error("failed to delete r2 image", img.r2Key, err);
+  const bucket = c.env.MEDIA;
+  if (bucket) {
+    const images = await db.select().from(productImages).where(eq(productImages.productId, id));
+    for (const img of images) {
+      try {
+        await deleteImage(bucket, img.r2Key);
+      } catch (err) {
+        console.error("failed to delete r2 image", img.r2Key, err);
+      }
     }
   }
 
@@ -230,6 +233,9 @@ admin.delete("/products/:id", async (c) => {
 });
 
 admin.post("/products/:id/images", async (c) => {
+  const bucket = c.env.MEDIA;
+  if (!bucket) return c.json({ detail: "image uploads require the R2 bucket binding" }, 503);
+
   const db = drizzle(c.env.DB);
   const productId = Number(c.req.param("id"));
   const productRow = await db.select({ id: products.id }).from(products).where(eq(products.id, productId)).limit(1);
@@ -240,7 +246,7 @@ admin.post("/products/:id/images", async (c) => {
   if (!(file instanceof File)) return c.json({ errors: { file: "required" } }, 400);
 
   const key = productImageKey(productId, file.name);
-  await putImage(c.env.MEDIA, key, file, file.type);
+  await putImage(bucket, key, file, file.type);
 
   const altText = typeof body["alt_text"] === "string" ? (body["alt_text"] as string) : "";
   const sortOrder = body["sort_order"] !== undefined ? Number(body["sort_order"]) : 0;
@@ -265,10 +271,13 @@ admin.delete("/products/:id/images/:imageId", async (c) => {
   const image = rows[0];
   if (!image) return c.json({ detail: "not found" }, 404);
 
-  try {
-    await deleteImage(c.env.MEDIA, image.r2Key);
-  } catch (err) {
-    console.error("failed to delete r2 image", image.r2Key, err);
+  const bucket = c.env.MEDIA;
+  if (bucket) {
+    try {
+      await deleteImage(bucket, image.r2Key);
+    } catch (err) {
+      console.error("failed to delete r2 image", image.r2Key, err);
+    }
   }
   await db.delete(productImages).where(eq(productImages.id, imageId));
   return c.body(null, 204);

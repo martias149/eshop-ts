@@ -19,7 +19,10 @@ app.route("/api", ordersRouter);
 app.route("/api/admin", admin);
 app.route("/api/support", supportRouter);
 
+// Only reached for keys with no matching static asset under public/media/.
 app.get("/media/:key{.+}", async (c) => {
+  if (!c.env.MEDIA) return c.json({ detail: "not found" }, 404);
+
   const key = c.req.param("key");
   const object = await c.env.MEDIA.get(key);
   if (!object) return c.json({ detail: "not found" }, 404);

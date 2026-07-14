@@ -1,14 +1,39 @@
 # eshop-ts
 
 TypeScript rewrite of the Django eshop app for Cloudflare Workers: Hono for
-routing, Drizzle ORM against D1, R2 for media, one Worker serving both the
-static frontend and the API.
+routing, Drizzle ORM against D1, one Worker serving both the static frontend
+and the API.
+
+Live: **https://eshop.brazdil94.workers.dev** (`/admin` for the staff panel).
 
 The original Django + DRF app lives in a separate repo (`eshop`) and is the
 behavioural reference. Django's admin has no equivalent here, so `/admin` is a
 custom staff panel (products with inline price/stock editing and image upload,
 categories, coupons, orders + bulk-ship, review moderation, user staff/active
 toggles) served from `public/admin.html`.
+
+## Media, and the absence of R2
+
+R2 is not enabled on the deployed account, so the seeded product images ship as
+static assets under `public/media/` — served free, and at exactly the
+`/media/products/*.png` URLs the seed data already points at. The `MEDIA`
+binding is therefore optional: admin image *upload* returns 503 without it, and
+everything else works. To turn uploads on, enable R2, create the bucket, and add
+the binding back to `wrangler.jsonc`:
+
+```sh
+npx wrangler r2 bucket create eshop-media
+for f in seed-media/products/*.png; do
+  npx wrangler r2 object put "eshop-media/products/$(basename "$f")" --file="$f" --remote
+done
+```
+
+```jsonc
+"r2_buckets": [{ "binding": "MEDIA", "bucket_name": "eshop-media" }]
+```
+
+No other code change is needed — `src/index.ts`'s `/media/*` route already
+falls back to R2 for any key with no matching static asset.
 
 Money is stored as integer cents throughout and rendered as decimal strings
 (`"24.60"`) on the wire. D1 has no interactive transactions, so checkout
@@ -46,8 +71,8 @@ npx wrangler login
 npx wrangler d1 create eshop-db
 # paste the returned database_id into wrangler.jsonc (d1_databases[0].database_id)
 
-npx wrangler r2 bucket create eshop-media
-
+# all secrets are optional — without them, payment uses the fake provider,
+# the chatbot 503s, and Sentry stays off. Nothing else degrades.
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_PUBLISHABLE_KEY
@@ -79,25 +104,9 @@ npx wrangler d1 execute eshop-db --local --file=./scripts/seed.sql
 npx wrangler d1 execute eshop-db --remote --file=./scripts/seed.sql
 ```
 
-The matching product images are staged in `seed-media/products/` and need to
-be uploaded to the `eshop-media` R2 bucket individually:
-
-```sh
-npx wrangler r2 object put eshop-media/products/mechanical-keyboard.png --file=./seed-media/products/mechanical-keyboard.png --remote
-npx wrangler r2 object put eshop-media/products/usb-c-dock.png --file=./seed-media/products/usb-c-dock.png --remote
-npx wrangler r2 object put eshop-media/products/rubber-duck.png --file=./seed-media/products/rubber-duck.png --remote
-npx wrangler r2 object put eshop-media/products/ergonomic-mouse.png --file=./seed-media/products/ergonomic-mouse.png --remote
-npx wrangler r2 object put eshop-media/products/hdmi-cable-2m.png --file=./seed-media/products/hdmi-cable-2m.png --remote
-npx wrangler r2 object put eshop-media/products/fidget-cube.png --file=./seed-media/products/fidget-cube.png --remote
-```
-
-Or upload them all in one loop:
-
-```sh
-for f in seed-media/products/*.png; do
-  npx wrangler r2 object put "eshop-media/products/$(basename "$f")" --file="$f" --remote
-done
-```
+The matching product images live in `public/media/products/` and deploy as
+static assets — no upload step. (`seed-media/products/` holds the same six
+files, staged for R2 if you ever enable it; see above.)
 
 Demo accounts: `admin@example.com` / `admin` (staff + superuser) and
 `student@example.com` / `correct-horse-battery` (regular user). Their
