@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>eshop</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://js-de.sentry-cdn.com/8f199f338cd4d3067f7969f1689ee28d.min.js" crossorigin="anonymous"></script>
+  <script src="https://js.stripe.com/v3/"></script>
+</head>
+<body>
+  <header>
+    <a href="#/" class="brand">eshop</a>
+    <nav>
+      <a href="#/">catalog</a>
+      <a href="#/account" id="nav-account">login</a>
+      <a href="admin.html" id="nav-admin" hidden>admin</a>
+      <a href="#/cart">cart <span id="cart-badge" class="badge" hidden>0</span></a>
+    </nav>
+  </header>
+  <main id="app">
+    <p class="muted">loading…</p>
+  </main>
+
+  <button id="chat-toggle" title="support chat">💬</button>
+  <div id="chat-panel" hidden>
+    <header>
+      <span>support</span>
+      <button id="chat-clear" class="chat-header-btn" title="clear conversation">↺</button>
+      <button id="chat-close" class="chat-header-btn" title="close">×</button>
+    </header>
+    <div id="chat-messages"></div>
+    <form id="chat-form">
+      <input id="chat-input" type="text" placeholder="ask about orders, products…" autocomplete="off">
+      <button type="submit">send</button>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
