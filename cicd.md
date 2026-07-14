@@ -1,266 +1,126 @@
-# CI/CD plan — eshop-ts (Cloudflare Workers + GitHub Actions)
+# CI/CD — eshop-ts (Cloudflare Workers + GitHub Actions)
 
-Plan for a free, three-tier pipeline: **test → dev → prod**. Written to be
-executed by Claude in this repo. Phases run in order; each ends with a
-verification step — do not proceed past a failed one.
+Free three-tier pipeline: **test → dev → prod**.
 
-## State of the world (verified 2026-07-14, re-verify anything marked ⟳)
+**Status: built and live**, except one step only a human can do — minting the
+Cloudflare API token (see [Remaining](#remaining)). Until that token is in the
+repo secrets, PR checks pass but the deploy workflows fail at the wrangler step.
 
-This replaces an earlier draft written when the rewrite still lived in a
-`worker/` subdirectory of the Django repo. Everything below reflects reality
-after the move, the R2 removal, and the first production deploy.
+## Topology
 
-- **Repo**: `github.com/jurab/eshop-ts`, public, only branch `main`. The worker
-  is the **repo root** — there is no `worker/` subdirectory, so no
-  `working-directory` is needed in workflows. The Django original lives in a
-  separate repo and is not part of this pipeline.
-- **Production is already live**: worker `eshop` at
-  `https://eshop.brazdil94.workers.dev`, D1 `eshop-db`
-  (`a1a82243-3632-4add-a3b7-bfcff7f248f6`), migrations applied, seed data
-  loaded. Deploys are currently manual (`npx wrangler deploy` from this
-  machine). This plan automates that and adds a dev tier beneath it.
-- **There is no R2.** It is not enabled on the account, so there is no `MEDIA`
-  binding and no `r2_buckets` block. Product images are static assets under
-  `public/media/`. Do not add R2 resources to any environment.
-- **Bindings**: `DB` (D1) and `ASSETS` (static assets from `public/`). Vars:
-  `STRIPE_CURRENCY`, `PASSWORD_HASH_ITERATIONS`.
-- **Secrets**: only `ANTHROPIC_API_KEY` is set, on prod. `STRIPE_SECRET_KEY`,
-  `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` and `SENTRY_DSN` are
-  **unset by design** — the app degrades cleanly (payment falls back to a fake
-  always-succeeds provider, Sentry stays off). Setting them is optional and
-  orthogonal to this plan.
-- **Tests are hermetic**: `@cloudflare/vitest-pool-workers` runs everything in
-  local workerd with migrations injected from `migrations/`. **CI needs no
-  cloud credentials to run tests** — only to deploy.
-- Cloudflare account `c8d6805d36d64b5a42f22fe1847a6b6f`, local `wrangler` is
-  OAuth-authenticated. `gh` is authenticated as `jurab` with `workflow` scope.
-- Scripts: `npm run typecheck` (`tsc --noEmit`), `npm test` (`vitest run`).
-
-## Target topology
-
-| Tier | Trigger | Worker | D1 | Purpose |
+| Tier | Trigger | Worker | D1 | URL |
 |---|---|---|---|---|
-| **test** | every PR | — | — | typecheck + vitest in local workerd. No cloud, no credentials, no deploy. |
-| **dev** | push to `dev` | `eshop-dev` | `eshop-db-dev` | Live scratch environment. Safe to break. Stripe test-mode keys if wired. |
-| **prod** | push to `main` | `eshop` | `eshop-db` | The real thing. Already live. |
+| **test** | every PR | — | — | — |
+| **dev** | push to `dev` | `eshop-dev` | `eshop-db-dev` (`6c946ab6…`) | https://eshop-dev.brazdil94.workers.dev |
+| **prod** | push to `main` | `eshop` | `eshop-db` (`a1a82243…`) | https://eshop.brazdil94.workers.dev |
 
-Intended flow: feature branch → PR into `dev` (test tier gates it) → merge
-(auto-deploys dev) → PR `dev` → `main` (test tier gates it again) → merge
-(auto-deploys prod).
+Flow: feature branch → PR into `dev` (tests gate it) → merge, dev deploys → PR
+`dev` → `main` (tests gate it again) → merge, prod deploys.
 
-The point of the split is that **dev has its own database**. A migration or a
-seed script that corrupts data can only corrupt `eshop-db-dev`. Sharing one D1
-across both tiers would defeat the entire exercise.
+The point of the split is that **dev has its own database**. A bad migration can
+only wreck `eshop-db-dev`. Verified by bumping a product's stock in dev and
+watching prod not move.
 
-## Ground rules
+The test tier needs **no Cloudflare credentials at all**: vitest runs the worker
+in local workerd, and the env checks use `wrangler deploy --dry-run`, which
+resolves config offline. So PRs from forks can be gated without handing out
+deploy rights.
 
-- Don't touch `src/` — this plan changes `wrangler.jsonc`, adds
-  `.github/workflows/`, and adds this file. If a verification failure traces to
-  app code, stop and report rather than patching around it.
-- Steps marked **HUMAN** need something only Jura can provide (dashboard
-  actions, secret values). Batch them: get as far as possible, then present all
-  HUMAN items at once.
+## What guards what
 
-## Phase 0 — preconditions
+The pipeline's failure modes are mostly silent, so each one has a test that
+fails on the real mistake. Every guard below was verified by reintroducing the
+bug and watching it go red — a test that has never failed is not a test.
 
-1. `npm ci && npm run typecheck && npm test` — all green (38 tests as of
-   writing).
-2. `npx wrangler whoami` succeeds and shows account
-   `c8d6805d36d64b5a42f22fe1847a6b6f`.
-3. `gh auth status` shows `workflow` scope.
-4. `git status` clean, on `main`, synced with origin.
+| Guard | Catches | Where |
+|---|---|---|
+| `no two environments share a database_id` | dev pointed at prod's D1 — every dev write and migration landing on live orders | `tests/node/envs.test.ts` |
+| `env.N resolves its own DB, plus ASSETS and every var` | a binding or var silently missing from an env, asserted against **wrangler's own resolver** (`deploy --dry-run`), not against a re-derivation of its inheritance rules | `tests/node/envs.test.ts` |
+| `env.N repeats every top-level var` | `vars` are **not** inherited by environments; a missing one is `undefined` at runtime, not a failed deploy | `tests/node/envs.test.ts` |
+| `every wrangler command in deploy-dev carries --env dev` | the dev workflow losing its env flag and migrating production instead | `tests/node/workflows.test.ts` |
+| `deploy-N runs the tests before it deploys` | shipping a red build | `tests/node/workflows.test.ts` |
+| `seed.sql still applies to the current schema` | hand-maintained seed SQL rotting against a schema change — only surfaces when provisioning a new environment | `tests/seed.test.ts` |
+| `the seeded password hashes still verify` | the seed's hash format drifting from `lib/hash.ts`, breaking both demo logins everywhere at once | `tests/seed.test.ts` |
+| `the API emits exactly the keys the frontend reads` | backend/frontend contract drift — the source of 3 of this rewrite's 4 real bugs | `tests/contract.test.ts` |
+| `the frontend reads the keys the API emits` | the other half of the same seam: `public/app.js` rendered in jsdom against a real-shaped payload | `tests/node/frontend.test.ts` |
 
-## Phase 1 — dev environment
+`tests/fixtures/api-contract.ts` is the single source of truth for that seam —
+both halves assert against it, so renaming a field fails both sides at once
+rather than letting them drift apart.
 
-1. `npx wrangler d1 create eshop-db-dev` → note the returned `database_id`.
+### Two things deliberately *not* tested
 
-2. Add an `env.dev` block to `wrangler.jsonc`, keeping the existing top-level
-   config as production:
+- **GitHub expression falsiness.** Testing it would mean re-implementing
+  GitHub's expression evaluator and asserting my copy behaves like my copy.
+  Instead the footgun is designed out: two literal workflow files, no computed
+  `--env`. (`x && '' || 'y'` always yields `'y'` because `''` is falsy — an
+  earlier draft of this plan used exactly that shape to pick an environment.)
+- **Whether the real cloud honours `--env`.** Needs live credentials; can't be
+  hermetic. Covered instead by the config test above plus the fact that tests
+  run before any destructive step.
 
-```jsonc
-"env": {
-  "dev": {
-    "name": "eshop-dev",
-    "d1_databases": [
-      {
-        "binding": "DB",
-        "database_name": "eshop-db-dev",
-        "database_id": "<id from step 1>"
-      }
-    ],
-    "vars": {
-      "STRIPE_CURRENCY": "eur",
-      "PASSWORD_HASH_ITERATIONS": 100000
-    }
-  }
-}
-```
+## Layout
 
-   `assets` is **not** repeated — see the inheritance note in the pitfalls
-   section; it is inherited, `vars` and `d1_databases` are not. ⟳ If the
-   top-level config has grown new *bindings* or *vars* since this was written,
-   mirror those into `env.dev` too (with `-dev` resource names).
+- `.github/workflows/ci.yml` — PRs: typecheck + tests. No credentials.
+- `.github/workflows/deploy-dev.yml` — push to `dev`: test → migrate → deploy → smoke.
+- `.github/workflows/deploy-prod.yml` — push to `main`: same, against production.
+- `wrangler.jsonc` — top-level config is production; `env.dev` is the dev tier.
+- Two vitest projects (`vitest.config.ts`): `worker` runs in real workerd;
+  `node` runs the seams that need `child_process` / `fs` / jsdom, none of which
+  exist inside workerd.
 
-3. Apply migrations to the dev database. **Verify the target first** — this is
-   the step that can silently rewrite production if the env flag isn't honored:
+## Remaining
 
-```sh
-npx wrangler d1 migrations list DB --env dev --remote   # must name eshop-db-dev
-npx wrangler d1 migrations apply DB --env dev --remote
-```
+1. **HUMAN** — mint a Cloudflare API token: dashboard → My Profile → API Tokens
+   → template **Edit Cloudflare Workers**, then add permission
+   **Account · D1 · Edit**, scoped to account `c8d6805d36d64b5a42f22fe1847a6b6f`.
+   The wrangler OAuth login cannot create this; it has no token-write scope.
 
-4. Seed it: `npx wrangler d1 execute DB --env dev --remote --file=./scripts/seed.sql`
+   ```sh
+   gh secret set CLOUDFLARE_API_TOKEN   # paste it
+   ```
 
-5. Deploy it once by hand so the worker exists (secrets can't be set on a
-   worker that has never been deployed): `npx wrangler deploy --env dev`
+   `CLOUDFLARE_ACCOUNT_ID` is already set.
 
-6. **HUMAN** (optional): dev secrets. `ANTHROPIC_API_KEY` for the chatbot; may
-   reuse the prod value if Jura says so. Stripe keys, if wired at all, must be
-   **test mode**. Set with `npx wrangler secret put <NAME> --env dev` — this is
-   a *separate* secret store from prod, nothing is shared.
+2. Then create the dev branch and watch the pipeline run for real:
 
-7. **Verify**: `npx wrangler deploy --dry-run --env dev` lists worker name
-   `eshop-dev` and bindings `DB` + `ASSETS`. Then
-   `curl https://eshop-dev.brazdil94.workers.dev/api/products` returns the six
-   seeded products. Then `npm test` still passes (vitest reads `wrangler.jsonc`
-   and must still parse it with the new `env` block).
+   ```sh
+   git checkout -b dev && git push -u origin dev
+   gh run watch
+   curl -s https://eshop-dev.brazdil94.workers.dev/api/products | head -c 200
+   ```
 
-## Phase 2 — GitHub secrets + workflows
+## Optional, not done
 
-1. **HUMAN**: create a Cloudflare API token (dashboard → My Profile → API
-   Tokens → template **Edit Cloudflare Workers**, then add permission
-   **Account · D1 · Edit**; scope it to this account). OAuth login cannot mint
-   this — it must come from the dashboard.
-
-2. Set repo secrets:
-
-```sh
-gh secret set CLOUDFLARE_API_TOKEN        # paste token
-gh secret set CLOUDFLARE_ACCOUNT_ID --body "c8d6805d36d64b5a42f22fe1847a6b6f"
-```
-
-3. `.github/workflows/ci.yml` — the test tier. Runs on every PR, needs no
-   credentials:
-
-```yaml
-name: CI
-
-on:
-  pull_request:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-```
-
-4. `.github/workflows/deploy.yml` — dev and prod. The `ENV_FLAG` expression is
-   written truthy-branch-first on purpose; see pitfalls.
-
-```yaml
-name: Deploy
-
-on:
-  push:
-    branches: [dev, main]
-
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: false
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      ENV_FLAG: ${{ github.ref_name == 'dev' && '--env dev' || '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - name: Apply D1 migrations
-        run: npx wrangler d1 migrations apply DB --remote $ENV_FLAG
-      - name: Deploy
-        run: npx wrangler deploy $ENV_FLAG
-```
-
-   Tests run before deploy in the same job: steps are sequential and a failing
-   step aborts the rest, so a red test cannot ship.
-
-5. Commit `wrangler.jsonc` + both workflows + this file. Push to `main`.
-
-## Phase 3 — verification (end to end)
-
-1. The Phase 2 push to `main` triggers **Deploy** → `gh run watch`. Must go
-   green through migrations and deploy. Then
-   `curl https://eshop.brazdil94.workers.dev/api/products` still returns JSON —
-   i.e. the automated deploy did not break the live site.
-2. Create the dev branch: `git checkout -b dev && git push -u origin dev`.
-   Watch the run, then curl `https://eshop-dev.brazdil94.workers.dev/api/products`.
-3. Confirm the two tiers are actually isolated — this is the whole point of the
-   split, so prove it rather than assume it. Change a product's stock in dev
-   only, and confirm prod is unaffected:
-
-```sh
-npx wrangler d1 execute DB --env dev --remote --command \
-  "UPDATE products SET stock=999 WHERE slug='rubber-duck'"
-curl -s https://eshop-dev.brazdil94.workers.dev/api/products/rubber-duck | grep -o '"stock":[0-9]*'  # 999
-curl -s https://eshop.brazdil94.workers.dev/api/products/rubber-duck     | grep -o '"stock":[0-9]*'  # 0
-```
-
-   Then put dev back: `UPDATE products SET stock=0 WHERE slug='rubber-duck'`.
-4. PR check: branch off `dev`, make a trivial change (whitespace in
-   `README.md`), open a PR against `dev`. The `CI / test` check must appear and
-   pass, and **no deploy must run**. Close the PR, delete the branch.
-
-## Phase 4 — optional hardening (only if Jura asks)
-
-- Branch protection on `main`: require the `CI / test` check and require PRs
+- Branch protection on `main` requiring the `CI / test` check
   (`gh api repos/jurab/eshop-ts/branches/main/protection`, needs admin).
-- A `preview` tier per-PR using wrangler versions (`wrangler versions upload`),
-  giving every PR its own URL. Costs nothing but adds moving parts.
-- Sentry release tagging in the deploy step (needs `SENTRY_DSN` wired first).
-- Stripe: a test-mode webhook pointing at
-  `https://eshop-dev.brazdil94.workers.dev/api/stripe/webhook` for dev, separate
-  from prod's, each with its own `STRIPE_WEBHOOK_SECRET`.
+- Stripe and Sentry secrets. Unset by design — payment falls back to a fake
+  always-succeeds provider and Sentry stays off. If Stripe is wired, dev must
+  get **test-mode** keys and its own webhook endpoint pointing at
+  `https://eshop-dev.brazdil94.workers.dev/api/stripe/webhook`.
+- Per-PR preview URLs via `wrangler versions upload`.
 
 ## Known pitfalls
 
-- **`vars` are not inherited by environments; `assets` is.** Verified against
-  wrangler 4.107 with a dry-run probe: an `env.dev` declaring only
-  `d1_databases` still resolved the `ASSETS` binding, but wrangler emitted
-  `"vars" exists at the top level, but not on "env.dev" … not inherited`. So
-  `env.dev` must repeat `vars` and every real binding, but not `assets`. The
-  `--dry-run --env dev` binding check in Phase 1.7 exists to catch this class of
-  mistake — trust its output over this paragraph.
+- **`vars` are not inherited by environments; `assets` is.** Verified with a
+  dry-run probe against wrangler 4.107: an `env.dev` declaring only
+  `d1_databases` still resolved `ASSETS`, but wrangler warned
+  `"vars" exists at the top level, but not on "env.dev" … not inherited`. An
+  earlier draft of this doc asserted the opposite about `assets` and was simply
+  wrong — which is exactly why the test asserts on wrangler's output instead of
+  on my understanding of it.
 - **`d1 migrations apply DB` takes the *binding* name**, resolved against the
-  selected environment. Getting this wrong points migrations at production.
-  Always run `d1 migrations list DB --env dev --remote` first and read which
-  database it names.
-- **Migrations run before the new code is live.** Fine for additive changes;
-  for a destructive one, expand-then-contract across two deploys.
-- **GitHub expression falsiness**: `x && '' || 'y'` always yields `'y'`, because
-  `''` is falsy. Keep `ENV_FLAG` truthy-branch-first, exactly as written.
-- **`compatibility_date` cannot outrun the installed wrangler's workerd.**
-  It is pinned to `2026-07-09` because a later date made `wrangler dev` refuse
-  to start (`newest date supported by this server binary is …`). Bump wrangler
-  before bumping the date. `vitest.config.ts` overrides it for the test runner
-  for the same reason — leave that override alone.
-- **Free tier**: GitHub Actions is unlimited on public repos (this one is
-  public); Workers free plan is 100k requests/day and hard-stops rather than
-  billing. Two workers and two D1 databases still cost nothing. Nothing in this
-  plan requires a paid plan.
+  selected environment. Drop `--env dev` and it applies to production. No
+  prompt, no diff, no undo.
+- **Migrations run before the new code is live.** Fine for additive changes; for
+  a destructive one, expand-then-contract across two deploys.
+- **`compatibility_date` cannot outrun the installed wrangler's workerd.** It is
+  pinned to `2026-07-09` because a later date made `wrangler dev` refuse to
+  start. The vitest `worker` project deliberately does **not** override the date
+  any more, so the suite now fails if someone bumps it past what the pinned
+  toolchain can run. Bump wrangler first.
+  (Do not try to derive the supported date from workerd's version string:
+  workerd `1.20260702.1` supports compat dates up to `2026-07-09`.)
+- **Free tier**: Actions is unlimited on public repos; Workers free plan hard-
+  stops at 100k req/day rather than billing. Two workers and two D1 databases
+  still cost nothing.

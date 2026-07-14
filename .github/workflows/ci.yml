@@ -1,0 +1,21 @@
+name: CI
+
+# The test tier. Runs on every PR and needs no Cloudflare credentials: vitest
+# runs the worker in local workerd, and the env checks use `wrangler deploy
+# --dry-run`, which resolves config offline.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

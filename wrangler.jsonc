@@ -26,5 +26,25 @@
   "vars": {
     "STRIPE_CURRENCY": "eur",
     "PASSWORD_HASH_ITERATIONS": 100000
+  },
+  // `assets` is inherited by environments; `vars` and bindings are NOT — every
+  // env must repeat them or it silently deploys without them. tests/node/envs
+  // asserts this against wrangler's own resolver, and that no two environments
+  // ever share a database_id.
+  "env": {
+    "dev": {
+      "name": "eshop-dev",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "eshop-db-dev",
+          "database_id": "6c946ab6-c209-4293-a11c-7e7a4ee24cd5"
+        }
+      ],
+      "vars": {
+        "STRIPE_CURRENCY": "eur",
+        "PASSWORD_HASH_ITERATIONS": 100000
+      }
+    }
   }
 }
