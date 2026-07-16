@@ -39,7 +39,13 @@ app.onError((err, c) => {
   if (c.env.SENTRY_DSN) {
     Sentry.captureException(err);
   }
-  console.error(err);
+  console.error({
+    event: "unhandled_error",
+    method: c.req.method,
+    path: c.req.path,
+    error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   return c.json({ detail: "internal server error" }, 500);
 });
 

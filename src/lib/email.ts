@@ -2,6 +2,7 @@
 // Stripe, the EMAIL binding is optional: without it (or without EMAIL_FROM, or
 // with a blank order email) sends are skipped and the order flow is unaffected.
 // A failed send is logged, never surfaced to the customer.
+import * as Sentry from "@sentry/cloudflare";
 import type { OrderItemRow, OrderRow } from "../db/schema";
 import type { Bindings } from "../types";
 import { centsToStr } from "./money";
@@ -96,6 +97,12 @@ export async function sendOrderEmail(env: Bindings, order: OrderRow, content: Em
       html: content.html,
     });
   } catch (err) {
-    console.error(`order email failed for ${order.id}:`, err);
+    if (env.SENTRY_DSN) Sentry.captureException(err);
+    console.error({
+      event: "order_email_failed",
+      orderId: order.id,
+      subject: content.subject,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
   }
 }
