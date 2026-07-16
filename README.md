@@ -35,6 +35,27 @@ done
 No other code change is needed — `src/index.ts`'s `/media/*` route already
 falls back to R2 for any key with no matching static asset.
 
+## Order emails, and the absence of Email Sending
+
+Order confirmation (on payment) and shipped notification (on admin bulk-ship)
+emails follow the same optional-binding pattern as R2: without the `EMAIL`
+binding and `EMAIL_FROM` var they are silently skipped and nothing else
+degrades. To turn them on, onboard a domain and add both to `wrangler.jsonc`:
+
+```sh
+npx wrangler email sending enable yourdomain.com
+```
+
+```jsonc
+"send_email": [{ "name": "EMAIL" }],
+"vars": { "EMAIL_FROM": "orders@yourdomain.com" }
+```
+
+A failed send is logged and never surfaced to the customer, and the
+pending→paid transition is written with a conditional update, so even when
+`/pay`, `/confirm-payment`, and the Stripe webhook race, exactly one of them
+sends the confirmation.
+
 Money is stored as integer cents throughout and rendered as decimal strings
 (`"24.60"`) on the wire. D1 has no interactive transactions, so checkout
 reserves stock with one conditional `UPDATE ... WHERE stock >= qty` per line

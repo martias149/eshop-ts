@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
@@ -23,6 +24,7 @@ import { discountForCents, findCouponByCode, isCouponValidNow } from "../lib/cou
 import { constructWebhookEvent, getStripeClient, paymentIntentFor } from "../lib/stripe";
 import { requireAuth } from "../lib/auth-middleware";
 import { anonOrUserLimit } from "../lib/rate-limit";
+import { orderConfirmationEmail, sendOrderEmail } from "../lib/email";
 
 type Env = { Bindings: Bindings; Variables: { user?: UserRow } };
 type DB = DrizzleD1Database<Record<string, unknown>>;
@@ -99,7 +101,12 @@ async function serializeOrder(db: DB, order: OrderRow) {
   };
 }
 
-export async function markPaid(db: DB, order: OrderRow, provider: string, transactionId: string): Promise<OrderRow> {
+export async function markPaid(
+  db: DB,
+  order: OrderRow,
+  provider: string,
+  transactionId: string,
+): Promise<{ order: OrderRow; transitioned: boolean }> {
   const nowTs = now();
 
   await db
@@ -107,13 +114,22 @@ export async function markPaid(db: DB, order: OrderRow, provider: string, transa
     .values({ orderId: order.id, provider, transactionId, amountCents: order.totalCents, createdAt: nowTs })
     .onConflictDoNothing({ target: payments.orderId });
 
-  await db
+  const res = await db
     .update(orders)
     .set({ status: "paid", updatedAt: nowTs })
-    .where(and(eq(orders.id, order.id), eq(orders.status, "pending")));
+    .where(and(eq(orders.id, order.id), eq(orders.status, "pending")))
+    .run();
 
   const updated = await db.select().from(orders).where(eq(orders.id, order.id)).get();
-  return updated!;
+  // The conditional pending->paid update writes a row exactly once even when
+  // /pay, /confirm-payment, and the Stripe webhook race, so only that winner
+  // reports transitioned=true and sends the confirmation email.
+  return { order: updated!, transitioned: (res.meta.changes ?? 0) > 0 };
+}
+
+async function queueConfirmationEmail(c: Context<Env>, db: DB, order: OrderRow): Promise<void> {
+  const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+  c.executionCtx.waitUntil(sendOrderEmail(c.env, order, orderConfirmationEmail(order, items)));
 }
 
 app.post("/orders", anonOrUserLimit, async (c) => {
@@ -258,7 +274,8 @@ app.post("/orders/:id/pay", anonOrUserLimit, async (c) => {
   }
 
   if (!c.env.STRIPE_SECRET_KEY) {
-    const updated = await markPaid(db, order, "fake", crypto.randomUUID());
+    const { order: updated, transitioned } = await markPaid(db, order, "fake", crypto.randomUUID());
+    if (transitioned) await queueConfirmationEmail(c, db, updated);
     return c.json(await serializeOrder(db, updated));
   }
 
@@ -286,7 +303,8 @@ app.post("/orders/:id/confirm-payment", anonOrUserLimit, async (c) => {
     return c.json({ detail: `payment not completed (${intent.status})` }, 400);
   }
 
-  const updated = await markPaid(db, order, "stripe", intent.id);
+  const { order: updated, transitioned } = await markPaid(db, order, "stripe", intent.id);
+  if (transitioned) await queueConfirmationEmail(c, db, updated);
   return c.json(await serializeOrder(db, updated));
 });
 
@@ -427,7 +445,8 @@ app.post("/stripe/webhook", async (c) => {
       const db = drizzle(c.env.DB);
       const order = await db.select().from(orders).where(eq(orders.id, orderId)).get();
       if (order) {
-        await markPaid(db, order, "stripe", intent.id);
+        const { order: updated, transitioned } = await markPaid(db, order, "stripe", intent.id);
+        if (transitioned) await queueConfirmationEmail(c, db, updated);
       }
     }
   }

@@ -5,6 +5,7 @@ import type { Bindings } from "../types";
 import { requireStaff } from "../lib/auth-middleware";
 import { centsToStr, strToCents } from "../lib/money";
 import { deleteImage, mediaUrl, productImageKey, putImage } from "../lib/media";
+import { orderShippedEmail, sendOrderEmail } from "../lib/email";
 import {
   categories,
   coupons,
@@ -539,7 +540,7 @@ admin.post("/orders/bulk-ship", async (c) => {
   if (ids.length === 0) return c.json({ updated: 0 });
 
   const toShip = await db
-    .select({ id: orders.id })
+    .select()
     .from(orders)
     .where(and(inArray(orders.id, ids), eq(orders.status, "paid")));
 
@@ -548,6 +549,15 @@ admin.post("/orders/bulk-ship", async (c) => {
       .update(orders)
       .set({ status: "shipped", updatedAt: now() })
       .where(inArray(orders.id, toShip.map((o) => o.id)));
+
+    const items = await db
+      .select()
+      .from(orderItems)
+      .where(inArray(orderItems.orderId, toShip.map((o) => o.id)));
+    for (const order of toShip) {
+      const orderLines = items.filter((it) => it.orderId === order.id);
+      c.executionCtx.waitUntil(sendOrderEmail(c.env, order, orderShippedEmail(order, orderLines)));
+    }
   }
 
   return c.json({ updated: toShip.length });
